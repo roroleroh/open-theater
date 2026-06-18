@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Open Theater - Link Test Bench</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+</head>
+<body>
+    <div id="container" class="hidden">
+        <div class="panel">
+            <h1>Open Theater &mdash; Link Test Bench</h1>
+            <p class="hint">Same renderer as the in-world screens. If it plays here, it'll play there.</p>
+
+            <div class="row">
+                <input id="urlInput" type="text" placeholder="https://yourmedia.example.com/video.mp4">
+                <select id="typeSelect">
+                    <option value="mp4">MP4 / direct file</option>
+                    <option value="hls">HLS (.m3u8)</option>
+                </select>
+                <button id="loadBtn">Load</button>
+                <button id="closeBtn">Close (Esc)</button>
+            </div>
+
+            <video id="player" controls muted></video>
+
+            <div id="status">Status: idle</div>
+            <div id="log"></div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
