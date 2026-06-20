@@ -23,8 +23,7 @@ server_scripts {
 
 files {
     'html/index.html',
-    'html/style.css',
-    'html/player.js'
+    'html/app.bundle.js'
 }
 
 ui_page 'html/index.html'

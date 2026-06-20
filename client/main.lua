@@ -69,12 +69,14 @@ local function destroyScreen(key)
     screens[key] = nil
 end
 
-local function sendDui(screenKey, payload)
+local function sendDui(screenKey, payload, quiet)
     local s = screens[screenKey]
     if not s or not s.duiObj then return end
     s.currentCmd = payload.type
     SendDuiMessage(s.duiObj, json.encode(payload))
-    if Config.debug then
+    -- `quiet` suppresses the log line: the proximity audio loop sends a volume
+    -- message several times a second, which would otherwise flood the console.
+    if Config.debug and not quiet then
         log(('-> DUI %s: %s'):format(screenKey, json.encode(payload)))
     end
 end
@@ -235,6 +237,49 @@ local function startRenderLoop(screenCfg)
                 -- Out of range: throttle hard, save frames.
                 Wait(Config.proximityInterval)
             end
+        end
+    end)
+end
+
+-- ---------- Proximity audio ----------
+-- The DUI plays its own audio; here we drive its volume from how close the
+-- player is to the screen so it gets louder as you approach and fades to
+-- silence past maxDistance. Volume 0..1 is forwarded to the DUI, which applies
+-- it uniformly to YouTube and direct video via react-player's volume prop.
+
+local function screenAudioBounds(screenCfg)
+    local minD = screenCfg.audioMinDistance or Config.audio.minDistance
+    local maxD = screenCfg.audioMaxDistance or Config.audio.maxDistance
+    if maxD <= minD then maxD = minD + 0.01 end
+    return minD, maxD
+end
+
+local function computeVolume(centerCoords, minD, maxD)
+    local pedCoords = GetEntityCoords(PlayerPedId())
+    local dist = #(pedCoords - centerCoords)
+    if dist <= minD then return 1.0 end
+    if dist >= maxD then return 0.0 end
+    local v = (maxD - dist) / (maxD - minD)
+    return v * v -- gentle (quadratic) rolloff
+end
+
+local function startAudioLoop(screenCfg)
+    CreateThread(function()
+        local key = screenCfg.id
+        local center = Utils.getCenterCoords(screenCfg.corners)
+        local interval = (Config.audio and Config.audio.updateInterval) or 200
+        local minD, maxD = screenAudioBounds(screenCfg)
+        local lastSent = -1.0
+        while screens[key] do
+            local s = screens[key]
+            if s and s.ready then
+                local vol = computeVolume(center, minD, maxD)
+                if math.abs(vol - lastSent) >= 0.01 then
+                    lastSent = vol
+                    sendDui(key, { type = 'volume', volume = vol }, true)
+                end
+            end
+            Wait(interval)
         end
     end)
 end
@@ -438,6 +483,7 @@ CreateThread(function()
     for _, screenCfg in ipairs(Config.screens) do
         initScreen(screenCfg)
         startRenderLoop(screenCfg)
+        startAudioLoop(screenCfg)
         local zone = createScreenZone(screenCfg)
         if zone then
             zones[screenCfg.id] = zone

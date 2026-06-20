@@ -7,6 +7,16 @@ Config.acePermission = 'opentheater.control'
 -- Stream distance check interval (ms) when player is outside range
 Config.proximityInterval = 500
 
+-- Proximity audio. The DUI volume is driven by the player's distance to the
+-- screen centre: full volume within minDistance, silent past maxDistance, with
+-- a gentle rolloff in between. Per-screen overrides are supported via
+-- audioMinDistance / audioMaxDistance on a screen entry.
+Config.audio = {
+    minDistance = 4.0,      -- within this many metres: full volume
+    maxDistance = 30.0,     -- beyond this many metres: silent
+    updateInterval = 200,   -- how often (ms) the volume is recalculated
+}
+
 -- YouTube IFrame API will be loaded async. If you proxy it, change this URL.
 Config.youtubeApiUrl = 'https://www.youtube.com/iframe_api'
 
