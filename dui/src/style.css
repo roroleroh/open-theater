@@ -3,12 +3,14 @@ html, body, #root {
     padding: 0;
     width: 100%;
     height: 100%;
-    background: transparent;
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
 }
 
+/* The wrapper is opaque so an active video fully covers the idle card behind
+   #root. When nothing is playing, Player renders nothing and the idle card
+   shows through. */
 .player-wrapper,
 .react-player {
     position: absolute;

@@ -38,6 +38,18 @@ local function initScreen(screenCfg)
         return
     end
 
+    -- Wait for the DUI browser surface to actually come up before snapshotting
+    -- its handle into a runtime texture. Binding the texture before the surface
+    -- exists yields a permanently blank texture (nothing ever shows on screen).
+    local waited = 0
+    while not IsDuiAvailable(duiObj) and waited < 5000 do
+        Wait(50)
+        waited = waited + 50
+    end
+    if not IsDuiAvailable(duiObj) then
+        log(('DUI not available after %dms for screen %s (continuing anyway)'):format(waited, key))
+    end
+
     local duiHandle = GetDuiHandle(duiObj)
     if not duiHandle then
         log(('GetDuiHandle failed for screen %s'):format(key))
@@ -58,8 +70,8 @@ local function initScreen(screenCfg)
         currentCmd = nil,
     }
 
-    log(('Screen %s ready (%dx%d)'):format(
-        key, screenCfg.duiWidth, screenCfg.duiHeight))
+    log(('Screen %s ready (%dx%d, dui available after %dms)'):format(
+        key, screenCfg.duiWidth, screenCfg.duiHeight, waited))
 end
 
 local function destroyScreen(key)
