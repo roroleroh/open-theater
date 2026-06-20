@@ -1,44 +1,40 @@
--- Ares Open Theater — server authority
--- Source of truth: per-screen playback state. Clients request sync on join
--- so late arrivals land at the correct timestamp.
+-- Ares Open Theater — server authority (statebag model)
+-- Each screen's playback state lives in a global statebag entry:
+--     GlobalState['opentheater:<screenId>'] = {
+--         url        = string|false,   -- false = stopped/idle
+--         playing    = bool,
+--         baseTime   = number,         -- video position (s) at startedAt
+--         startedAt  = number,         -- server os.time() (epoch s) of baseTime
+--         lastCommand= string,
+--     }
+-- Statebags replicate to every client automatically, including late joiners,
+-- so clients just read the bag and compute the current position — no manual
+-- broadcast or request/response handshake needed.
 
 local RESOURCE_NAME = GetCurrentResourceName()
 
--- theaterStates[screenId] = {
---     url           = string,         -- last URL (kept for /stop & resume UX)
---     playing       = bool,
---     startedAt     = number,         -- GetGameTimer() ms when last play/seek began
---     pausedAt      = number|nil,     -- GetGameTimer() ms when paused (nil if playing)
---     timestamp     = number,         -- seconds into the video at startedAt
---     lastCommand   = string,         -- last action type for debugging
---     source        = number|nil,     -- server source that issued last command
--- }
-local theaterStates = {}
+local function stateKey(screenId)
+    return ('opentheater:%s'):format(screenId)
+end
 
 local function getState(screenId)
-    return theaterStates[screenId]
+    return GlobalState[stateKey(screenId)]
 end
 
--- Compute current playback position (seconds) given a state object.
--- Server-authoritative: every client uses the same formula, no client drift.
-local function currentTimestamp(state)
-    if not state or not state.playing then
-        return state and state.timestamp or 0
+local function setState(screenId, st)
+    GlobalState[stateKey(screenId)] = st
+end
+
+-- Current playback position (seconds) for a state. Server-authoritative:
+-- baseTime plus however long it's been playing since startedAt.
+local function currentPosition(st)
+    if not st then return 0 end
+    if st.playing and st.startedAt then
+        local elapsed = os.time() - st.startedAt
+        if elapsed < 0 then elapsed = 0 end
+        return (st.baseTime or 0) + elapsed
     end
-    local elapsedMs = GetGameTimer() - state.startedAt
-    if elapsedMs < 0 then elapsedMs = 0 end
-    return state.timestamp + (elapsedMs / 1000.0)
-end
-
-local function broadcastState(screenId)
-    local state = theaterStates[screenId]
-    if not state then return end
-    TriggerClientEvent('opentheater:syncState', -1, screenId, {
-        url = state.url,
-        playing = state.playing,
-        timestamp = currentTimestamp(state),
-        lastCommand = state.lastCommand,
-    })
+    return st.baseTime or 0
 end
 
 local function hasControl(source)
@@ -62,6 +58,12 @@ local function screenExists(screenId)
     return false
 end
 
+-- Clients use this once at startup to cancel out client/server clock skew, so
+-- the epoch-based position maths stays accurate regardless of local clocks.
+lib.callback.register('opentheater:serverTime', function(_)
+    return os.time()
+end)
+
 -- ---------- Control events from clients ----------
 
 RegisterNetEvent('opentheater:play', function(screenId, url)
@@ -70,22 +72,17 @@ RegisterNetEvent('opentheater:play', function(screenId, url)
     if type(screenId) ~= 'string' or type(url) ~= 'string' then return end
     if not screenExists(screenId) then return end
 
-    theaterStates[screenId] = {
+    setState(screenId, {
         url = url,
         playing = true,
-        startedAt = GetGameTimer(),
-        pausedAt = nil,
-        timestamp = 0,
+        baseTime = 0,
+        startedAt = os.time(),
         lastCommand = 'play',
-        source = src,
-    }
+    })
 
     if Config.debug then
-        print(('[%s] play screen=%s url=%s by=%d'):format(
-            RESOURCE_NAME, screenId, url, src))
+        print(('[%s] play screen=%s url=%s by=%d'):format(RESOURCE_NAME, screenId, url, src))
     end
-
-    broadcastState(screenId)
 end)
 
 RegisterNetEvent('opentheater:pause', function(screenId)
@@ -93,42 +90,60 @@ RegisterNetEvent('opentheater:pause', function(screenId)
     if not hasControl(src) then return end
     if type(screenId) ~= 'string' then return end
 
-    local state = theaterStates[screenId]
-    if not state or not state.playing then return end
+    local st = getState(screenId)
+    if not st or not st.url or not st.playing then return end
 
-    state.timestamp = currentTimestamp(state)
-    state.playing = false
-    state.pausedAt = GetGameTimer()
-    state.lastCommand = 'pause'
-    state.source = src
+    setState(screenId, {
+        url = st.url,
+        playing = false,
+        baseTime = currentPosition(st),
+        startedAt = os.time(),
+        lastCommand = 'pause',
+    })
 
     if Config.debug then
-        print(('[%s] pause screen=%s at=%.2fs'):format(
-            RESOURCE_NAME, screenId, state.timestamp))
+        print(('[%s] pause screen=%s'):format(RESOURCE_NAME, screenId))
     end
+end)
 
-    broadcastState(screenId)
+RegisterNetEvent('opentheater:resume', function(screenId)
+    local src = source
+    if not hasControl(src) then return end
+    if type(screenId) ~= 'string' then return end
+
+    local st = getState(screenId)
+    if not st or not st.url or st.playing then return end
+
+    setState(screenId, {
+        url = st.url,
+        playing = true,
+        baseTime = st.baseTime or 0,
+        startedAt = os.time(),
+        lastCommand = 'resume',
+    })
+
+    if Config.debug then
+        print(('[%s] resume screen=%s'):format(RESOURCE_NAME, screenId))
+    end
 end)
 
 RegisterNetEvent('opentheater:stop', function(screenId)
     local src = source
     if not hasControl(src) then return end
     if type(screenId) ~= 'string' then return end
+    if not screenExists(screenId) then return end
 
-    local state = theaterStates[screenId]
-    if not state then return end
-
-    state.playing = false
-    state.pausedAt = GetGameTimer()
-    state.timestamp = 0
-    state.lastCommand = 'stop'
-    state.source = src
+    setState(screenId, {
+        url = false,
+        playing = false,
+        baseTime = 0,
+        startedAt = os.time(),
+        lastCommand = 'stop',
+    })
 
     if Config.debug then
         print(('[%s] stop screen=%s'):format(RESOURCE_NAME, screenId))
     end
-
-    broadcastState(screenId)
 end)
 
 RegisterNetEvent('opentheater:seek', function(screenId, timestamp)
@@ -138,45 +153,37 @@ RegisterNetEvent('opentheater:seek', function(screenId, timestamp)
     timestamp = tonumber(timestamp)
     if not timestamp or timestamp < 0 then return end
 
-    local state = theaterStates[screenId]
-    if not state then return end
+    local st = getState(screenId)
+    if not st or not st.url then return end
 
-    state.timestamp = timestamp
-    state.startedAt = GetGameTimer()
-    state.playing = state.playing and true or false
-    state.pausedAt = state.playing and nil or GetGameTimer()
-    state.lastCommand = 'seek'
-    state.source = src
+    setState(screenId, {
+        url = st.url,
+        playing = st.playing and true or false,
+        baseTime = timestamp,
+        startedAt = os.time(),
+        lastCommand = 'seek',
+    })
 
     if Config.debug then
-        print(('[%s] seek screen=%s to=%.2fs'):format(
-            RESOURCE_NAME, screenId, timestamp))
-    end
-
-    broadcastState(screenId)
-end)
-
--- ---------- Late join / reconnect ----------
-
-RegisterNetEvent('opentheater:requestState', function()
-    local src = source
-    if Config.debug then
-        print(('[%s] requestState from=%d'):format(RESOURCE_NAME, src))
-    end
-    for screenId, _ in pairs(theaterStates) do
-        local state = theaterStates[screenId]
-        TriggerClientEvent('opentheater:syncState', src, screenId, {
-            url = state.url,
-            playing = state.playing,
-            timestamp = currentTimestamp(state),
-            lastCommand = state.lastCommand,
-        })
+        print(('[%s] seek screen=%s to=%.2fs'):format(RESOURCE_NAME, screenId, timestamp))
     end
 end)
 
--- ---------- Admin: force-clear all state on resource stop ----------
+-- ---------- Init: give every configured screen a defined idle state ----------
+-- Existing state is preserved across resource restarts (the server keeps
+-- running), so a movie survives a script restart.
 
-AddEventHandler('onResourceStop', function(name)
+AddEventHandler('onResourceStart', function(name)
     if name ~= RESOURCE_NAME then return end
-    theaterStates = {}
+    for _, screen in ipairs(Config.screens) do
+        if getState(screen.id) == nil then
+            setState(screen.id, {
+                url = false,
+                playing = false,
+                baseTime = 0,
+                startedAt = os.time(),
+                lastCommand = 'init',
+            })
+        end
+    end
 end)

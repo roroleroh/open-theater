@@ -3,10 +3,10 @@ import ReactPlayer from 'react-player';
 import useNuiMessage from './useNuiMessage';
 import report from './report';
 
-// Flip to false to hide the on-screen debug HUD. While true, the DUI overlays a
-// small event log (messages received, player ready/start/error) so playback
-// problems are visible directly on the projected screen — DUI has no console.
-const DEBUG = true;
+// Flip to true to overlay an on-screen event log on the projected screen for
+// debugging (messages received, player ready/start/error). DUI events are also
+// mirrored to the F8 console via report(), regardless of this flag.
+const DEBUG = false;
 
 export default function Player() {
     const playerRef = useRef(null);
@@ -27,19 +27,20 @@ export default function Player() {
 
     const onPlay = useCallback((msg) => {
         const seek = Number(msg.timestamp) || 0;
-        pushLog(`msg play: ${String(msg.url).slice(0, 60)}`);
+        const wantPlaying = msg.playing !== false; // default true
+        pushLog(`msg play: ${String(msg.url).slice(0, 60)} @${seek.toFixed(1)}s playing=${wantPlaying}`);
         if (msg.url && msg.url !== url) {
             ready.current = false;
             pendingSeek.current = seek;
             setUrl(msg.url);
-            setPlaying(true);
+            setPlaying(wantPlaying);
         } else {
             if (ready.current && playerRef.current && seek > 0) {
                 playerRef.current.seekTo(seek, 'seconds');
             } else {
                 pendingSeek.current = seek;
             }
-            setPlaying(true);
+            setPlaying(wantPlaying);
         }
     }, [url, pushLog]);
 

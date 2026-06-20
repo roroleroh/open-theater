@@ -42,15 +42,23 @@ INSTALL
 
 HOW IT WORKS
 ------------
-- Server holds source-of-truth state per screen:
-    theaterStates[id] = { url, playing, startedAt, pausedAt, timestamp, ... }
-- Every control event goes through ACE check on the server.
-- Server broadcasts opentheater:syncState with the *current* playback
-  position (timestamp + elapsed since startedAt) so every player — including
-  late joiners — starts at the right second.
-- Each client mounts a DUI per screen, renders it onto the screen corners
-  with DrawSpritePoly every frame (only while the player is in stream range).
-- When out of range, the render thread throttles to Config.proximityInterval.
+- Server holds source-of-truth state per screen in a GLOBAL STATEBAG:
+    GlobalState['opentheater:<id>'] = { url, playing, baseTime, startedAt }
+  where startedAt is the server epoch (os.time) at which the video position
+  was baseTime. Statebags replicate to every client automatically, including
+  late joiners, so there's no manual broadcast or request handshake.
+- Every control event goes through an ACE check on the server, which updates
+  the statebag.
+- Each client computes the current position from the bag (baseTime + elapsed
+  since startedAt) and pushes it to its DUI. A one-time client/server clock
+  offset (opentheater:serverTime callback) cancels out wrong local clocks.
+- Sync is range-gated: entering a screen's stream range syncs the DUI to the
+  live position; leaving range stops that DUI so it isn't decoding off-screen.
+  Live play/pause/seek/stop while in range arrive via the statebag change
+  handler.
+- Each client mounts a DUI per screen and renders it onto the screen corners
+  with DrawSpritePoly every frame (only while in stream range). Out of range,
+  the render thread throttles to Config.proximityInterval.
 
 
 VIDEO SOURCES
@@ -87,14 +95,25 @@ Each screen's DUI plays its own audio; the client scales that audio by how far
 the player is from the screen centre:
 
   - Within Config.audio.minDistance (default 4m): full volume.
-  - Past   Config.audio.maxDistance (default 30m): silent.
+  - Past the screen's reach: silent.
   - In between: a gentle (quadratic) rolloff.
 
-So a screen gets louder as you walk toward it and fades out as you leave.
-Override per screen with audioMinDistance / audioMaxDistance on the screen
-entry. The volume is applied uniformly to YouTube and direct video, since it
-goes through react-player's volume prop. (It is distance-based, not full 3D
-panning — there is no left/right spatialisation.)
+The reach scales with the physical screen size so bigger screens carry further:
+
+    reach = screenDiagonal(m) * Config.audio.reachPerMeter
+    reach = clamp(reach, Config.audio.minReach, Config.audio.maxReach)
+
+  - reachPerMeter (default 2.5) — how far sound carries per metre of screen.
+  - minReach (default 18m) — floor, so even small screens are heard from a
+    fair distance.
+  - maxReach (default 60m) — ceiling, so a huge screen doesn't blast the map.
+
+Per-screen overrides win over the size-based calc: set audioMinDistance and/or
+audioMaxDistance on a screen entry to pin exact values for that screen.
+
+Volume is applied uniformly to YouTube and direct video via react-player's
+volume prop. (It is distance-based, not full 3D panning — there is no
+left/right spatialisation.)
 
 
 GETTING COORDS (KIVO)
@@ -200,27 +219,33 @@ can hijack playback.
 
 SYNC MODEL
 ----------
-            Lua client                    Server                     DUI
-              |                            |                          |
-   play(url)-->|---- opentheater:play --->|-- validates ACE,         |
-              |                            |   stores state,          |
-              |                            |   broadcasts ------------>|-- play(url, ts)
-              |                            |                          |
-   join ----->|---- opentheater:requestState ->|-- computes current ts ->|-- play(url, ts)
-              |                            |                          |
-   pause ---->|---- opentheater:pause --->|-- updates state,         |
-              |                            |   broadcasts ------------>|-- pause
-              |                            |                          |
+            Lua client                 Server                  GlobalState
+              |                          |                          |
+   play(url)-->|-- opentheater:play ---->|-- validates ACE, ------->|  set
+              |                          |   writes statebag        |  'opentheater:<id>'
+              |                          |                          |
+              |   (statebag replicates to ALL clients automatically) |
+              |<-------------------------------------------------- < |
+              |                                                       |
+   in range? -+-- read bag, compute pos = baseTime + (now-startedAt) -> DUI play(url, pos)
+              |
+   pause ---->|-- opentheater:pause --->|-- writes statebag ------->|  update -> replicate
+
+Late joiners and players walking into range just read the current statebag —
+no join handshake. A one-time opentheater:serverTime callback removes local
+clock skew from the position maths.
 
 
 DUI vs NUI — TWO DIFFERENT THINGS
 ---------------------------------
 - DUI: the html/* page mounted as a runtime texture, projected onto the
-  screen in the world. This is what the players see.
-- NUI: the html/* page also serves as the browser overlay (ui_page).
-  Currently unused by the operator flow — the URL entry goes through
-  an ox_lib inputDialog instead. The 'close' NUI callback is kept as
-  a defensive fallback in case anything ever opens NUI focus.
+  screen in the world. This is what the players see. There is intentionally
+  NO ui_page — declaring one would render the page fullscreen over everyone's
+  view. DUI is loaded from https://cfx-nui-<resource>/ (a real https origin,
+  which YouTube's IFrame embedding requires; the legacy nui:// scheme breaks
+  YouTube).
+- NUI callbacks: the DUI POSTs back to the client for diagnostics (duilog) via
+  the cfx-nui origin. The 'close' callback is a defensive fallback.
 
 The operator's flow today:
   Operator (in zone)
@@ -228,8 +253,8 @@ The operator's flow today:
                   ->  lib.inputDialog (URL)
                   ->  Client normalizes URL
                   ->  TriggerServerEvent('opentheater:play')
-                  ->  Server validates ACE + URL, broadcasts
-                  ->  All clients' DUIs receive via opentheater:syncState
+                  ->  Server validates ACE + URL, writes the statebag
+                  ->  Statebag replicates; clients in range sync their DUI
 
 
 ADDING MORE SCREENS

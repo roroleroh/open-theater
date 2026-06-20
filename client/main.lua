@@ -97,23 +97,60 @@ local function sendDui(screenKey, payload, quiet)
     end
 end
 
--- ---------- Sync handler (server -> client -> DUI) ----------
+-- ---------- Sync (server statebag -> DUI) ----------
+-- The server keeps each screen's playback state in a global statebag entry
+-- 'opentheater:<id>'. We read that bag and compute the current position, then
+-- push it to the DUI. We only drive the DUI while the player is within the
+-- screen's stream range, so off-screen screens don't waste CPU decoding video;
+-- entering range re-syncs to the live position.
 
-RegisterNetEvent('opentheater:syncState', function(screenId, state)
-    if not state or type(screenId) ~= 'string' then return end
+local function stateKey(screenId)
+    return ('opentheater:%s'):format(screenId)
+end
+
+-- (server os.time()) - (client os.time()), measured once at startup so the
+-- epoch maths below is immune to a wrong local clock.
+local serverTimeOffset = 0
+
+local function serverNow()
+    return os.time() + serverTimeOffset
+end
+
+local function currentPosition(st)
+    if not st then return 0 end
+    if st.playing and st.startedAt then
+        local elapsed = serverNow() - st.startedAt
+        if elapsed < 0 then elapsed = 0 end
+        return (st.baseTime or 0) + elapsed
+    end
+    return st.baseTime or 0
+end
+
+-- Push the screen's current global state to its DUI.
+local function syncScreenToState(screenId)
     if not screens[screenId] then return end
-
-    if not state.url then
-        -- Stop / blank: tell DUI to clear
+    local st = GlobalState[stateKey(screenId)]
+    if not st or not st.url then
         sendDui(screenId, { type = 'stop' })
         return
     end
-
     sendDui(screenId, {
-        type = state.playing and 'play' or 'pause',
-        url = state.url,
-        timestamp = state.timestamp or 0,
+        type = 'play',
+        url = st.url,
+        timestamp = currentPosition(st),
+        playing = st.playing and true or false,
     })
+end
+
+-- React to live state changes (play/pause/seek/stop by any operator) — but only
+-- if the player is currently in range of that screen.
+AddStateBagChangeHandler(nil, 'global', function(_, key, _, _, _)
+    local screenId = key:match('^opentheater:(.+)$')
+    if not screenId or not screens[screenId] then return end
+    local cfg = getScreenConfig(screenId)
+    if cfg and Utils.isInRange(cfg.interactCoords, cfg.streamDistance) then
+        syncScreenToState(screenId)
+    end
 end)
 
 -- ---------- Interaction zone + URL entry ----------
@@ -272,9 +309,19 @@ end
 -- silence past maxDistance. Volume 0..1 is forwarded to the DUI, which applies
 -- it uniformly to YouTube and direct video via react-player's volume prop.
 
+-- Returns the min (full-volume) and max (silent) distances for a screen.
+-- maxDistance scales with the screen's physical size unless pinned per-screen.
 local function screenAudioBounds(screenCfg)
-    local minD = screenCfg.audioMinDistance or Config.audio.minDistance
-    local maxD = screenCfg.audioMaxDistance or Config.audio.maxDistance
+    local a = Config.audio
+    local minD = screenCfg.audioMinDistance or a.minDistance
+    local maxD = screenCfg.audioMaxDistance
+    if not maxD then
+        local c = screenCfg.corners
+        local diagonal = #(c.topLeft - c.bottomRight)
+        maxD = diagonal * (a.reachPerMeter or 2.5)
+        if a.minReach and maxD < a.minReach then maxD = a.minReach end
+        if a.maxReach and maxD > a.maxReach then maxD = a.maxReach end
+    end
     if maxD <= minD then maxD = minD + 0.01 end
     return minD, maxD
 end
@@ -305,6 +352,32 @@ local function startAudioLoop(screenCfg)
                 end
             end
             Wait(interval)
+        end
+    end)
+end
+
+-- ---------- Sync loop (range-gated) ----------
+-- Entering a screen's range syncs the DUI to the live position; leaving range
+-- stops the DUI so it isn't decoding video off-screen. Live changes while in
+-- range are handled by the statebag change handler above.
+
+local function startSyncLoop(screenCfg)
+    CreateThread(function()
+        local key = screenCfg.id
+        local wasInRange = false
+        while screens[key] do
+            local s = screens[key]
+            if s and s.ready then
+                local inRange = Utils.isInRange(screenCfg.interactCoords, screenCfg.streamDistance)
+                if inRange and not wasInRange then
+                    syncScreenToState(key)
+                    wasInRange = true
+                elseif (not inRange) and wasInRange then
+                    sendDui(key, { type = 'stop' })
+                    wasInRange = false
+                end
+            end
+            Wait(750)
         end
     end)
 end
@@ -503,19 +576,26 @@ end
 -- ---------- Boot / teardown ----------
 
 CreateThread(function()
-    -- Small delay to let the NUI page settle before the DUI mounts.
+    -- Measure the client/server clock offset once so the epoch-based position
+    -- maths is accurate even if this machine's clock is off.
+    local srvTime = lib.callback.await('opentheater:serverTime', false)
+    if srvTime then
+        serverTimeOffset = srvTime - os.time()
+        log(('server time offset = %ds'):format(serverTimeOffset))
+    end
+
+    -- Small delay to let the page settle before the DUI mounts.
     Wait(500)
     for _, screenCfg in ipairs(Config.screens) do
         initScreen(screenCfg)
         startRenderLoop(screenCfg)
         startAudioLoop(screenCfg)
+        startSyncLoop(screenCfg)
         local zone = createScreenZone(screenCfg)
         if zone then
             zones[screenCfg.id] = zone
         end
     end
-    -- Ask the server for current state once we're up.
-    TriggerServerEvent('opentheater:requestState')
 end)
 
 AddEventHandler('onResourceStop', function(name)

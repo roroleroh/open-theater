@@ -8,12 +8,21 @@ Config.acePermission = 'opentheater.control'
 Config.proximityInterval = 500
 
 -- Proximity audio. The DUI volume is driven by the player's distance to the
--- screen centre: full volume within minDistance, silent past maxDistance, with
--- a gentle rolloff in between. Per-screen overrides are supported via
--- audioMinDistance / audioMaxDistance on a screen entry.
+-- screen centre: full volume within minDistance, silent at the screen's reach,
+-- with a gentle rolloff in between.
+--
+-- The reach scales with the physical screen size:
+--     reach = screenDiagonal (m) * reachPerMeter, clamped to [minReach, maxReach]
+-- so bigger screens are heard from further away, while minReach guarantees even
+-- small screens are still audible from a fair distance.
+--
+-- Per-screen overrides win over all of this: set audioMinDistance and/or
+-- audioMaxDistance on a screen entry to pin exact values for that screen.
 Config.audio = {
     minDistance = 4.0,      -- within this many metres: full volume
-    maxDistance = 30.0,     -- beyond this many metres: silent
+    reachPerMeter = 2.5,    -- reach = screen diagonal * this
+    minReach = 18.0,        -- floor: smallest screens are still heard this far
+    maxReach = 60.0,        -- ceiling: huge screens don't blast the whole map
     updateInterval = 200,   -- how often (ms) the volume is recalculated
 }
 
