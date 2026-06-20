@@ -27,3 +27,26 @@ html, body, #root {
     object-fit: contain;
     background: #000;
 }
+
+.debug-hud {
+    position: absolute;
+    left: 1.5%;
+    top: 1.5%;
+    z-index: 10;
+    max-width: 70%;
+    padding: 1.2% 1.6%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #7CFC00;
+    font-family: Consolas, monospace;
+    font-size: 1.7vw;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    word-break: break-all;
+    pointer-events: none;
+    border-radius: 6px;
+}
+
+.debug-hud .debug-state {
+    color: #fff;
+    margin-bottom: 0.4em;
+}

@@ -232,6 +232,15 @@ RegisterNUICallback('close', function(_, cb)
     cb({ ok = true })
 end)
 
+-- DUI -> client log bridge. The DUI (loaded from https://cfx-nui-<resource>/)
+-- POSTs log lines here so DUI-side events (message received, player
+-- ready/start, JS/HLS errors) show up in the F8 console.
+RegisterNUICallback('duilog', function(data, cb)
+    local line = type(data) == 'table' and data.line or tostring(data)
+    print(('[%s:DUI] %s'):format(RESOURCE_NAME, line))
+    cb({ ok = true })
+end)
+
 -- ---------- Render loop ----------
 
 local function startRenderLoop(screenCfg)
