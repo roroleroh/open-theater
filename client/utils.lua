@@ -27,30 +27,46 @@ function Utils.isInRange(coords, distance)
     return Utils.distSq(pedCoords, coords) <= maxSq
 end
 
--- Render the DUI texture onto the four world corners using DrawSpritePoly.
--- UV layout for a normal-on rectangle:
+-- Render the DUI texture onto the four world corners.
+--
+-- DrawSpritePoly draws ONE textured triangle: 3 vertices (9 floats), the
+-- colour, the txd/txn, then per-vertex UVW (u, v, w) — 3 floats each. It does
+-- NOT take a 4th vertex. A rectangle is therefore two triangles:
+--   triangle 1: topLeft -> topRight    -> bottomRight
+--   triangle 2: topLeft -> bottomRight -> bottomLeft
+-- UV layout (w is unused for a flat texture, so it stays 0.0):
 --   topLeft(0,0)  topRight(1,0)
---   botLeft(0,1)  botRight(1,1)
--- DrawSpritePoly draws a quad in the order: 1-2-3, 1-3-4 (i.e. topLeft,
--- topRight, bottomRight, bottomLeft), which matches our corner order.
+--   bottomLeft(0,1)  bottomRight(1,1)
+-- Triangles are single-sided (back-face culled), so we also draw the reverse
+-- winding — that keeps the screen visible no matter which way the configured
+-- corners are wound.
 function Utils.drawScreenPoly(corners, txdName, textureName, opacity)
     opacity = opacity or 255
     if opacity < 0 then opacity = 0 end
     if opacity > 255 then opacity = 255 end
 
     local c = corners
-    DrawSpritePoly(
-        c.topLeft.x,     c.topLeft.y,     c.topLeft.z,
-        c.topRight.x,    c.topRight.y,    c.topRight.z,
-        c.bottomRight.x, c.bottomRight.y, c.bottomRight.z,
-        c.bottomLeft.x,  c.bottomLeft.y,  c.bottomLeft.z,
-        255, 255, 255, opacity,
-        txdName, textureName,
-        0.0, 0.0, -- topLeft UV
-        1.0, 0.0, -- topRight UV
-        1.0, 1.0, -- bottomRight UV
-        0.0, 1.0  -- bottomLeft UV
-    )
+    local tl, tr, br, bl = c.topLeft, c.topRight, c.bottomRight, c.bottomLeft
+
+    local function tri(a, b, d, ua, va, ub, vb, ud, vd)
+        DrawSpritePoly(
+            a.x, a.y, a.z,
+            b.x, b.y, b.z,
+            d.x, d.y, d.z,
+            255, 255, 255, opacity,
+            txdName, textureName,
+            ua, va, 0.0,
+            ub, vb, 0.0,
+            ud, vd, 0.0
+        )
+    end
+
+    -- Front faces
+    tri(tl, tr, br, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+    tri(tl, br, bl, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+    -- Back faces (reverse winding, same UV per vertex)
+    tri(tl, br, tr, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0)
+    tri(tl, bl, br, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
 end
 
 -- Format a vec3 as a ready-to-paste string for config.lua.

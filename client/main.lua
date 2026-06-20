@@ -113,6 +113,38 @@ local setupWizard = {
     current = 0,
 }
 
+-- Normalize whatever the operator pastes into a canonical URL the DUI player
+-- understands: YouTube variants collapse to watch?v=ID, direct streams pass
+-- through. Returns nil for anything unrecognized so the caller can reject it.
+local function normalizeUrl(raw)
+    if type(raw) ~= 'string' then return nil end
+    local url = raw:gsub('^%s+', ''):gsub('%s+$', '')
+    if url == '' then return nil end
+
+    -- Direct stream / video — passthrough (query string preserved).
+    if url:find('%.m3u8') or url:find('%.mp4') or url:find('%.webm') or url:find('%.ogg') then
+        return url
+    end
+
+    -- Bare 11-char YouTube id.
+    if #url == 11 and url:match('^[%w_-]+$') then
+        return ('https://www.youtube.com/watch?v=%s'):format(url)
+    end
+
+    -- YouTube variants -> watch?v=ID
+    local id = url:match('youtu%.be/([%w_-]+)')
+        or url:match('[?&]v=([%w_-]+)')
+        or url:match('youtube%.com/shorts/([%w_-]+)')
+        or url:match('youtube%.com/embed/([%w_-]+)')
+        or url:match('youtube%.com/live/([%w_-]+)')
+        or url:match('youtube%.com/v/([%w_-]+)')
+    if id then
+        return ('https://www.youtube.com/watch?v=%s'):format(id)
+    end
+
+    return nil
+end
+
 local function openUrlInput(screenCfg)
     local input = lib.inputDialog(('Theater — %s'):format(screenCfg.label), {
         {
@@ -125,7 +157,15 @@ local function openUrlInput(screenCfg)
     })
     if not input or not input[1] then return end
 
-    local url = input[1]
+    local url = normalizeUrl(input[1])
+    if not url then
+        lib.notify({
+            type = 'error',
+            description = 'Unrecognized URL. Use a YouTube link or a .mp4 / .m3u8 / .webm / .ogg stream.',
+        })
+        return
+    end
+
     if Config.debug then
         log(('play %s url=%s'):format(screenCfg.id, url))
     end

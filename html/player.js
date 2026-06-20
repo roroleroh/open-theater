@@ -52,12 +52,19 @@
     }
 
     function youtubeIdFromUrl(url) {
+        if (typeof url !== 'string') return null;
+        // Bare 11-char video id.
+        if (/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
         try {
             const u = new URL(url);
             if (u.hostname.includes('youtu.be')) {
-                return u.pathname.slice(1);
+                return u.pathname.slice(1).split('/')[0] || null;
             }
-            return u.searchParams.get('v') || null;
+            const v = u.searchParams.get('v');
+            if (v) return v;
+            // /shorts/ID, /embed/ID, /live/ID, /v/ID
+            const m = u.pathname.match(/\/(?:shorts|embed|live|v)\/([A-Za-z0-9_-]{11})/);
+            return m ? m[1] : null;
         } catch (_) {
             return null;
         }
@@ -160,8 +167,27 @@
         }
     }
 
+    function backendReady() {
+        if (state.backend === 'youtube') return state.ytReady;
+        if (state.backend === 'mp4') return true;
+        return false;
+    }
+
     function bufferOrApply(cmd) {
-        if (!state.backend) {
+        // 'play' and 'stop' establish or tear down the backend, so they must
+        // always run immediately — they are what *selects* and mounts a
+        // backend in the first place. The old code buffered them while
+        // state.backend was null, but since the backend is only ever set from
+        // inside apply(), the very first play was buffered forever and nothing
+        // ever mounted: no video, no audio, no error.
+        if (cmd.type === 'play' || cmd.type === 'stop') {
+            apply(cmd);
+            return;
+        }
+        // Control commands (pause/seek) need a mounted, ready backend.
+        // Buffer them until the backend signals ready; flushBuffer() then
+        // replays them in order.
+        if (!backendReady()) {
             state.buffer.push(cmd);
             return;
         }
