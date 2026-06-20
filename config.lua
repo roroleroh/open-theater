@@ -1,37 +1,43 @@
 Config = {}
-Config.debug = true -- Always include in fresh projects
+Config.debug = true
 
--- Each entry = one in-world screen. Each gets its own networked prop +
--- statebag, so multiple "open theaters" can exist independently.
---
--- IMPORTANT: textureDict / textureName are placeholders for prop_tv_flat_01.
--- Verify the actual texture dictionary + texture name for whatever prop you
--- end up using (dump it with a texture viewer / OpenIV) before relying on
--- AddReplaceTexture - wrong names will silently no-op.
+-- ACE permission required to control the theater (play/pause/stop/seek)
+Config.acePermission = 'opentheater.control'
+
+-- Stream distance check interval (ms) when player is outside range
+Config.proximityInterval = 500
+
+-- YouTube IFrame API will be loaded async. If you proxy it, change this URL.
+Config.youtubeApiUrl = 'https://www.youtube.com/iframe_api'
+
+-- Allowed video sources. 'youtube' = IFrame API, 'mp4' = HTML5 <video>
+Config.videoSources = {
+    youtube = true,
+    mp4 = true,
+}
+
+-- Screen definitions.
+-- corners order MUST be: topLeft, topRight, bottomRight, bottomLeft
+-- interactCoords is the player stand-point (where the prompt is shown).
+-- duiWidth / duiHeight should match the on-screen aspect ratio.
 Config.screens = {
     {
-        id = 'theater_main',
-        coords = vec4(0.0, 0.0, 0.0, 0.0), -- x, y, z, heading - set your real coords
-        model = `prop_tv_flat_01`,
-        textureDict = 'prop_tv_flat_01',
-        textureName = 'screen_2',
-        renderTargetWidth = 1920,
-        renderTargetHeight = 1080,
-        streamDistance = 25.0 -- DUI is created/destroyed based on player distance
-    }
+    id = 'screen_430072',
+    label = 'New Theater Screen',
+    corners = {
+        topLeft     = vec3(-1747.6044, -850.1349, 18.7815),
+        topRight    = vec3(-1756.2386, -837.8496, 18.6306),
+        bottomRight = vec3(-1756.2363, -837.8528, 10.3434),
+        bottomLeft  = vec3(-1747.6036, -850.1359, 10.3410),
+    },
+    duiWidth = 1280,
+    duiHeight = 720,
+    interactCoords = vec3(-1756.0884, -848.8927, 8.6466),
+    interactHeading = 324.80,
+    streamDistance = 100.0,
+    hidePrompt = false,
+},
+    -- Add more screens by copying the block above.
+    -- Each screen needs a UNIQUE id, a unique runtime TXD will be created
+    -- with the name 'theater_<id>'.
 }
-
--- Server-side validation: only these extensions are accepted per video type.
--- This is a basic sanity filter, not a security boundary - the real
--- protection is that the page is just <video src="..."> / hls.js, no DRM,
--- no plugin execution.
-Config.allowedExtensions = {
-    mp4 = { '.mp4', '.m4v', '.webm' },
-    hls = { '.m3u8' }
-}
-
--- How often (ms) each client re-checks distance to every screen
-Config.distanceCheckInterval = 2000
-
--- Max URL length accepted by the setVideo callback
-Config.maxUrlLength = 1024

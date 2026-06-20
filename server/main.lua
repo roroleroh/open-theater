@@ -1,131 +1,182 @@
--- server/main.lua
---
--- Spawns one networked prop per configured screen and exposes callbacks for
--- setting/clearing what's playing on it. All URL validation happens here -
--- clients only ever request a change, the server decides whether it's valid
--- and writes the statebag.
+-- Ares Open Theater — server authority
+-- Source of truth: per-screen playback state. Clients request sync on join
+-- so late arrivals land at the correct timestamp.
 
-local screenEntities = {} -- [screenId] = netId
+local RESOURCE_NAME = GetCurrentResourceName()
 
-CreateThread(function()
-    for _, screen in pairs(Config.screens) do
-        local obj = CreateObject(screen.model, screen.coords.x, screen.coords.y, screen.coords.z, true, true, false)
-        SetEntityHeading(obj, screen.coords.w)
-        FreezeEntityPosition(obj, true)
+-- theaterStates[screenId] = {
+--     url           = string,         -- last URL (kept for /stop & resume UX)
+--     playing       = bool,
+--     startedAt     = number,         -- GetGameTimer() ms when last play/seek began
+--     pausedAt      = number|nil,     -- GetGameTimer() ms when paused (nil if playing)
+--     timestamp     = number,         -- seconds into the video at startedAt
+--     lastCommand   = string,         -- last action type for debugging
+--     source        = number|nil,     -- server source that issued last command
+-- }
+local theaterStates = {}
 
-        local netId = NetworkGetNetworkIdFromEntity(obj)
-        screenEntities[screen.id] = netId
+local function getState(screenId)
+    return theaterStates[screenId]
+end
 
-        -- Initialize statebag defaults so clients have something sane to read
-        -- before anyone has loaded a video yet.
-        Entity(obj):setState('screenId', screen.id, true)
-        Entity(obj):setState('videoUrl', nil, true)
-        Entity(obj):setState('videoType', nil, true)
-        Entity(obj):setState('startTime', 0, true)
-        Entity(obj):setState('playing', false, true)
+-- Compute current playback position (seconds) given a state object.
+-- Server-authoritative: every client uses the same formula, no client drift.
+local function currentTimestamp(state)
+    if not state or not state.playing then
+        return state and state.timestamp or 0
+    end
+    local elapsedMs = GetGameTimer() - state.startedAt
+    if elapsedMs < 0 then elapsedMs = 0 end
+    return state.timestamp + (elapsedMs / 1000.0)
+end
 
+local function broadcastState(screenId)
+    local state = theaterStates[screenId]
+    if not state then return end
+    TriggerClientEvent('opentheater:syncState', -1, screenId, {
+        url = state.url,
+        playing = state.playing,
+        timestamp = currentTimestamp(state),
+        lastCommand = state.lastCommand,
+    })
+end
+
+local function hasControl(source)
+    if Config.debug then
+        return true
+    end
+    if not IsPlayerAceAllowed(source, Config.acePermission) then
         if Config.debug then
-            print(('[OpenTheater] Spawned screen "%s" (netId %s) at %.2f, %.2f, %.2f')
-                :format(screen.id, netId, screen.coords.x, screen.coords.y, screen.coords.z))
+            print(('[%s] source=%d denied: missing ace %q'):format(
+                RESOURCE_NAME, source, Config.acePermission))
         end
+        return false
     end
-end)
+    return true
+end
 
--- Returns { [screenId] = netId } so clients can resolve the actual entity
-lib.callback.register('ares_opentheater:getScreens', function(_source)
-    local result = {}
-
-    for screenId, netId in pairs(screenEntities) do
-        result[screenId] = netId
+local function screenExists(screenId)
+    for _, screen in ipairs(Config.screens) do
+        if screen.id == screenId then return true end
     end
+    return false
+end
 
-    return result
-end)
+-- ---------- Control events from clients ----------
 
--- Validates and applies a video to a screen's statebag
-lib.callback.register('ares_opentheater:setVideo', function(source, data)
-    if type(data) ~= 'table' then
-        return false, 'Malformed request'
-    end
+RegisterNetEvent('opentheater:play', function(screenId, url)
+    local src = source
+    if not hasControl(src) then return end
+    if type(screenId) ~= 'string' or type(url) ~= 'string' then return end
+    if not screenExists(screenId) then return end
 
-    local screenId = data.screenId
-    local url = data.url
-    local videoType = data.videoType
-
-    if type(url) ~= 'string' or #url == 0 or #url > Config.maxUrlLength then
-        return false, 'Invalid URL'
-    end
-
-    if videoType ~= 'mp4' and videoType ~= 'hls' then
-        return false, 'Invalid video type'
-    end
-
-    if not url:match('^https?://') then
-        return false, 'URL must start with http:// or https://'
-    end
-
-    local validExtension = false
-    local lowered = url:lower()
-
-    for _, ext in pairs(Config.allowedExtensions[videoType]) do
-        -- match the extension either at the end of the URL or right before a query string
-        if lowered:find(ext .. '$') or lowered:find(ext .. '?', 1, true) then
-            validExtension = true
-            break
-        end
-    end
-
-    if not validExtension then
-        return false, ('URL does not look like a .%s file for type "%s"')
-            :format(table.concat(Config.allowedExtensions[videoType], '/.'), videoType)
-    end
-
-    local netId = screenEntities[screenId]
-    if not netId then
-        return false, 'Unknown screen'
-    end
-
-    local entity = NetworkGetEntityFromNetworkId(netId)
-    if not DoesEntityExist(entity) then
-        return false, 'Screen entity missing'
-    end
-
-    Entity(entity):setState('videoUrl', url, true)
-    Entity(entity):setState('videoType', videoType, true)
-    Entity(entity):setState('startTime', GetCloudTimeAsInt(), true)
-    Entity(entity):setState('playing', true, true)
+    theaterStates[screenId] = {
+        url = url,
+        playing = true,
+        startedAt = GetGameTimer(),
+        pausedAt = nil,
+        timestamp = 0,
+        lastCommand = 'play',
+        source = src,
+    }
 
     if Config.debug then
-        print(('[OpenTheater] %s set screen "%s" -> [%s] %s'):format(GetPlayerName(source), screenId, videoType, url))
+        print(('[%s] play screen=%s url=%s by=%d'):format(
+            RESOURCE_NAME, screenId, url, src))
     end
 
-    return true
+    broadcastState(screenId)
 end)
 
--- Clears a screen back to idle
-lib.callback.register('ares_opentheater:stopVideo', function(source, data)
-    if type(data) ~= 'table' then
-        return false, 'Malformed request'
-    end
+RegisterNetEvent('opentheater:pause', function(screenId)
+    local src = source
+    if not hasControl(src) then return end
+    if type(screenId) ~= 'string' then return end
 
-    local netId = screenEntities[data.screenId]
-    if not netId then
-        return false, 'Unknown screen'
-    end
+    local state = theaterStates[screenId]
+    if not state or not state.playing then return end
 
-    local entity = NetworkGetEntityFromNetworkId(netId)
-    if not DoesEntityExist(entity) then
-        return false, 'Screen entity missing'
-    end
-
-    Entity(entity):setState('playing', false, true)
-    Entity(entity):setState('videoUrl', nil, true)
-    Entity(entity):setState('videoType', nil, true)
-    Entity(entity):setState('startTime', 0, true)
+    state.timestamp = currentTimestamp(state)
+    state.playing = false
+    state.pausedAt = GetGameTimer()
+    state.lastCommand = 'pause'
+    state.source = src
 
     if Config.debug then
-        print(('[OpenTheater] %s stopped screen "%s"'):format(GetPlayerName(source), data.screenId))
+        print(('[%s] pause screen=%s at=%.2fs'):format(
+            RESOURCE_NAME, screenId, state.timestamp))
     end
 
-    return true
+    broadcastState(screenId)
+end)
+
+RegisterNetEvent('opentheater:stop', function(screenId)
+    local src = source
+    if not hasControl(src) then return end
+    if type(screenId) ~= 'string' then return end
+
+    local state = theaterStates[screenId]
+    if not state then return end
+
+    state.playing = false
+    state.pausedAt = GetGameTimer()
+    state.timestamp = 0
+    state.lastCommand = 'stop'
+    state.source = src
+
+    if Config.debug then
+        print(('[%s] stop screen=%s'):format(RESOURCE_NAME, screenId))
+    end
+
+    broadcastState(screenId)
+end)
+
+RegisterNetEvent('opentheater:seek', function(screenId, timestamp)
+    local src = source
+    if not hasControl(src) then return end
+    if type(screenId) ~= 'string' then return end
+    timestamp = tonumber(timestamp)
+    if not timestamp or timestamp < 0 then return end
+
+    local state = theaterStates[screenId]
+    if not state then return end
+
+    state.timestamp = timestamp
+    state.startedAt = GetGameTimer()
+    state.playing = state.playing and true or false
+    state.pausedAt = state.playing and nil or GetGameTimer()
+    state.lastCommand = 'seek'
+    state.source = src
+
+    if Config.debug then
+        print(('[%s] seek screen=%s to=%.2fs'):format(
+            RESOURCE_NAME, screenId, timestamp))
+    end
+
+    broadcastState(screenId)
+end)
+
+-- ---------- Late join / reconnect ----------
+
+RegisterNetEvent('opentheater:requestState', function()
+    local src = source
+    if Config.debug then
+        print(('[%s] requestState from=%d'):format(RESOURCE_NAME, src))
+    end
+    for screenId, _ in pairs(theaterStates) do
+        local state = theaterStates[screenId]
+        TriggerClientEvent('opentheater:syncState', src, screenId, {
+            url = state.url,
+            playing = state.playing,
+            timestamp = currentTimestamp(state),
+            lastCommand = state.lastCommand,
+        })
+    end
+end)
+
+-- ---------- Admin: force-clear all state on resource stop ----------
+
+AddEventHandler('onResourceStop', function(name)
+    if name ~= RESOURCE_NAME then return end
+    theaterStates = {}
 end)
