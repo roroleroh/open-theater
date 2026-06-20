@@ -31,7 +31,11 @@ local function initScreen(screenCfg)
     local key = screenCfg.id
     if screens[key] then return end
 
-    local url = ('nui://%s/html/index.html'):format(RESOURCE_NAME)
+    -- Use the https cfx-nui origin (NOT the legacy nui:// scheme). YouTube's
+    -- IFrame embedding rejects non-https origins, so nui:// silently breaks
+    -- YouTube playback; https://cfx-nui-<resource>/ is a real https origin that
+    -- YouTube accepts. Files just need to be listed in fxmanifest `files{}`.
+    local url = ('https://cfx-nui-%s/html/index.html'):format(RESOURCE_NAME)
     local duiObj = CreateDui(url, screenCfg.duiWidth, screenCfg.duiHeight)
     if not duiObj then
         log(('DUI creation failed for screen %s'):format(key))

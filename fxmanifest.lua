@@ -26,7 +26,9 @@ files {
     'html/app.bundle.js'
 }
 
-ui_page 'html/index.html'
+-- NOTE: no ui_page. This page is used ONLY as a DUI (projected onto the screen
+-- surface), never as a fullscreen NUI overlay. Declaring ui_page would render
+-- the page fullscreen over the player's view. DUI only needs the files above.
 
 dependency 'ox_lib'
 
