@@ -23,7 +23,8 @@ server_scripts {
 
 files {
     'html/index.html',
-    'html/app.bundle.js'
+    'html/app.bundle.js',
+    'stream/*.ydr',
 }
 
 -- NOTE: no ui_page. This page is used ONLY as a DUI (projected onto the screen

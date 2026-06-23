@@ -10,6 +10,8 @@ local RESOURCE_NAME = GetCurrentResourceName()
 --   txdName       : unique runtime TXD name
 --   ready         : bool, true once the runtime texture exists
 --   currentCmd    : last command sent to the DUI (debug)
+--   prop          : entity handle of the spawned flag prop (if useProp)
+--   currentFlagModel : model name currently spawned (nil if no prop / cleared)
 local screens = {}
 
 local function getScreenConfig(screenId)
@@ -17,6 +19,14 @@ local function getScreenConfig(screenId)
         if s.id == screenId then return s end
     end
     return nil
+end
+
+-- Statebag key for a screen. Mirrors the server's stateKey() in server/main.lua.
+-- Declared up here (rather than next to the other sync helpers) because
+-- spawnProp / despawnProp / syncProp — defined further down — capture it as
+-- an upvalue; a local declared after a function can't be seen by it.
+local function stateKey(screenId)
+    return ('opentheater:%s'):format(screenId)
 end
 
 local function log(...)
@@ -81,8 +91,105 @@ end
 local function destroyScreen(key)
     local s = screens[key]
     if not s then return end
+    despawnProp(key)
     if s.duiObj then DestroyDui(s.duiObj) end
     screens[key] = nil
+end
+
+-- ---------- Prop (flag) spawn ----------
+-- Each screen with useProp = true gets a physical model spawned at prop.pos
+-- while the player is within range. The model chosen is the one currently in
+-- the screen's statebag (`flag`), falling back to prop.model on first spawn.
+-- The prop is a local (non-networked) object — only the spawning client sees
+-- it, matching the per-client DUI architecture. Re-spawned when the flag
+-- changes (operator picks a new country).
+
+-- Spawn the configured prop for a screen with a specific model. Blocks
+-- briefly while the model loads. Returns true on success, false otherwise.
+local function spawnProp(screenCfg, modelName)
+    if not screenCfg.useProp or not screenCfg.prop then return false end
+    local key = screenCfg.id
+    local s = screens[key]
+    if not s then return false end
+
+    -- Tear down any existing prop first; we only ever have one per screen.
+    if s.prop and DoesEntityExist(s.prop) then
+        DeleteEntity(s.prop)
+    end
+    s.prop = nil
+    s.currentFlagModel = nil
+
+    local model = modelName or screenCfg.prop.model
+    if not model or model == '' then return false end
+
+    local hash = GetHashKey(model)
+    if hash == 0 or not IsModelInCdimage(hash) then
+        log(('Prop model %q not in CD image (screen %s)'):format(model, key))
+        return false
+    end
+    RequestModel(hash)
+    local waited = 0
+    while not HasModelLoaded(hash) and waited < 5000 do
+        Wait(50)
+        waited = waited + 50
+    end
+    if not HasModelLoaded(hash) then
+        log(('Prop model %q failed to load within 5s (screen %s)'):format(model, key))
+        return false
+    end
+
+    local p = screenCfg.prop
+    local obj = CreateObject(hash, p.pos.x, p.pos.y, p.pos.z, false, false, false)
+    if not obj or obj == 0 then
+        log(('CreateObject failed for %s (screen %s)'):format(model, key))
+        SetModelAsNoLongerNeeded(hash)
+        return false
+    end
+
+    -- Quaternion rotation: SetEntityQuaternion(entity, x, y, z, w).
+    -- prop.rot is a vec4; if it's missing we leave the spawn heading as-is.
+    if p.rot then
+        SetEntityQuaternion(obj, p.rot.x, p.rot.y, p.rot.z, p.rot.w)
+    end
+    FreezeEntityPosition(obj, true)
+    SetModelAsNoLongerNeeded(hash)
+
+    s.prop = obj
+    s.currentFlagModel = model
+    log(('Prop %s spawned for screen %s at (%.3f, %.3f, %.3f) after %dms'):format(
+        model, key, p.pos.x, p.pos.y, p.pos.z, waited))
+    return true
+end
+
+local function despawnProp(key)
+    local s = screens[key]
+    if not s then return end
+    if s.prop and DoesEntityExist(s.prop) then
+        DeleteEntity(s.prop)
+        if Config.debug then
+            log(('Prop despawned for screen %s'):format(key))
+        end
+    end
+    s.prop = nil
+    s.currentFlagModel = nil
+end
+
+-- Reconcile the spawned prop with the statebag's current flag. The statebag
+-- flag is an operator override; when it's unset, the screen's configured
+-- default (prop.model) is used. Either way a prop is spawned while the
+-- player is in range — we just respawn when the model changes.
+local function syncProp(screenId)
+    local cfg = getScreenConfig(screenId)
+    if not cfg or not cfg.useProp or not cfg.prop then return end
+    local s = screens[screenId]
+    if not s then return end
+
+    local st = GlobalState[stateKey(screenId)]
+    local flagModel = (st and st.flag) or cfg.prop.model
+
+    if flagModel and flagModel ~= s.currentFlagModel then
+        spawnProp(cfg, flagModel)
+    end
 end
 
 local function sendDui(screenKey, payload, quiet)
@@ -103,17 +210,47 @@ end
 -- push it to the DUI. We only drive the DUI while the player is within the
 -- screen's stream range, so off-screen screens don't waste CPU decoding video;
 -- entering range re-syncs to the live position.
+--
+-- (stateKey() lives at the top of the file alongside getScreenConfig; the
+-- prop spawn functions defined before this section need it as an upvalue.)
 
-local function stateKey(screenId)
-    return ('opentheater:%s'):format(screenId)
+-- Convert local wall-clock time (from the GetLocalTime native) to a UTC
+-- epoch value in seconds. Pure Lua math — no os.time, which the FiveM
+-- client doesn't expose reliably. Matches what Lua's os.time() would
+-- return (seconds since 1970-01-01 UTC) so it lines up with the server's
+-- startedAt values, which the server populates via os.time().
+local function getEpochFromLocal()
+    local year, month, day, hour, minute, second = GetLocalTime()
+    if not year then return 0 end
+
+    local daysInMonth = {
+        31, 28, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31,
+    }
+    local function isLeap(y)
+        return (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0)
+    end
+
+    local days = 0
+    for y = 1970, year - 1 do
+        days = days + (isLeap(y) and 366 or 365)
+    end
+    for m = 1, month - 1 do
+        days = days + daysInMonth[m]
+        if m == 2 and isLeap(year) then days = days + 1 end
+    end
+    days = days + (day - 1)
+
+    return days * 86400 + hour * 3600 + minute * 60 + second
 end
 
--- (server os.time()) - (client os.time()), measured once at startup so the
--- epoch maths below is immune to a wrong local clock.
+-- (server epoch) - (client local-epoch), measured once at startup so the
+-- elapsed-time maths below is immune to wrong/clueless local clocks. Uses
+-- GetLocalTime on the client side, not os.time.
 local serverTimeOffset = 0
 
 local function serverNow()
-    return os.time() + serverTimeOffset
+    return getEpochFromLocal() + serverTimeOffset
 end
 
 local function currentPosition(st)
@@ -142,14 +279,19 @@ local function syncScreenToState(screenId)
     })
 end
 
--- React to live state changes (play/pause/seek/stop by any operator) — but only
--- if the player is currently in range of that screen.
+-- React to live state changes (play/pause/seek/stop/flag by any operator) —
+-- but only if the player is currently in range of that screen. Video changes
+-- push the new position to the DUI; flag changes re-spawn the prop with the
+-- new model (if the screen has useProp). Prop sync runs in its own thread
+-- because model loading can block briefly and we don't want to stall the
+-- statebag handler.
 AddStateBagChangeHandler(nil, 'global', function(_, key, _, _, _)
     local screenId = key:match('^opentheater:(.+)$')
     if not screenId or not screens[screenId] then return end
     local cfg = getScreenConfig(screenId)
     if cfg and Utils.isInRange(cfg.interactCoords, cfg.streamDistance) then
         syncScreenToState(screenId)
+        CreateThread(function() syncProp(screenId) end)
     end
 end)
 
@@ -227,6 +369,73 @@ local function openUrlInput(screenCfg)
     TriggerServerEvent('opentheater:play', screenCfg.id, url)
 end
 
+-- ---------- Flag picker ----------
+-- Builds an ox_lib context menu listing every Config.flags entry. Selecting
+-- one fires the server event that updates the statebag AND writes KV.
+-- Showing a context menu (rather than an input dialog) keeps the picker
+-- tappable on controllers and scales nicely to 23+ flags.
+
+local function openFlagPicker(screenCfg)
+    local options = {}
+    for _, f in ipairs(Config.flags or {}) do
+        local model = f.model
+        local label = f.label or model
+        options[#options + 1] = {
+            title = label,
+            description = model,
+            onSelect = function()
+                if Config.debug then
+                    log(('flag %s -> %s'):format(screenCfg.id, model))
+                end
+                TriggerServerEvent('opentheater:setFlag', screenCfg.id, model)
+                lib.notify({
+                    type = 'success',
+                    description = ('Flag set: %s'):format(label),
+                })
+            end,
+        }
+    end
+    lib.registerContext({
+        id = 'opentheater_flag_picker',
+        title = ('Choose Flag — %s'):format(screenCfg.label),
+        options = options,
+    })
+    lib.showContext('opentheater_flag_picker')
+end
+
+-- Main theater control menu — what the operator actually sees on E press.
+-- The flag option only appears if the screen has useProp = true (no point
+-- showing it for screens that don't render a prop). To return to the
+-- default flag, just pick the default from the picker.
+local function openTheaterMenu(screenCfg)
+    local options = {
+        {
+            title = 'Set Video URL',
+            description = 'Play a YouTube video or .mp4 / .m3u8 / .webm / .ogg stream',
+            icon = 'film',
+            onSelect = function()
+                openUrlInput(screenCfg)
+            end,
+        },
+    }
+    if screenCfg.useProp then
+        options[#options + 1] = {
+            title = 'Set Flag',
+            description = 'Choose which country flag is displayed on the prop',
+            icon = 'flag',
+            onSelect = function()
+                openFlagPicker(screenCfg)
+            end,
+        }
+    end
+    lib.registerContext({
+        id = ('opentheater_main_%s'):format(screenCfg.id),
+        title = ('Theater — %s'):format(screenCfg.label),
+        options = options,
+    })
+    lib.showContext(('opentheater_main_%s'):format(screenCfg.id))
+end
+
 local function createScreenZone(screenCfg)
     if screenCfg.hidePrompt then return nil end
 
@@ -242,12 +451,12 @@ local function createScreenZone(screenCfg)
             if setupWizard.active then return end
             if not promptShown then
                 BeginTextCommandDisplayHelp('STRING')
-                AddTextComponentSubstringPlayerName('Press ~INPUT_CONTEXT~ to set screen URL')
+                AddTextComponentSubstringPlayerName('Press ~INPUT_CONTEXT~ to open theater controls')
                 EndTextCommandDisplayHelp(0, false, true, -1)
                 promptShown = true
             end
             if IsControlJustPressed(0, 38) then -- E
-                openUrlInput(screenCfg)
+                openTheaterMenu(screenCfg)
             end
         end,
         onExit = function()
@@ -357,9 +566,11 @@ local function startAudioLoop(screenCfg)
 end
 
 -- ---------- Sync loop (range-gated) ----------
--- Entering a screen's range syncs the DUI to the live position; leaving range
--- stops the DUI so it isn't decoding video off-screen. Live changes while in
--- range are handled by the statebag change handler above.
+-- Entering a screen's range syncs the DUI to the live position AND spawns
+-- the prop (if useProp) with the currently selected flag. Leaving range
+-- stops the DUI so it isn't decoding video off-screen and deletes the prop
+-- so it isn't sitting there for nobody. Live changes while in range are
+-- handled by the statebag change handler above.
 
 local function startSyncLoop(screenCfg)
     CreateThread(function()
@@ -371,9 +582,11 @@ local function startSyncLoop(screenCfg)
                 local inRange = Utils.isInRange(screenCfg.interactCoords, screenCfg.streamDistance)
                 if inRange and not wasInRange then
                     syncScreenToState(key)
+                    syncProp(key)
                     wasInRange = true
                 elseif (not inRange) and wasInRange then
                     sendDui(key, { type = 'stop' })
+                    despawnProp(key)
                     wasInRange = false
                 end
             end
@@ -577,10 +790,12 @@ end
 
 CreateThread(function()
     -- Measure the client/server clock offset once so the epoch-based position
-    -- maths is accurate even if this machine's clock is off.
+    -- maths is accurate even if this machine's clock is off. Client side reads
+    -- its wall clock via GetLocalTime (not os.time, which the client doesn't
+    -- expose reliably), then subtracts from the server's epoch.
     local srvTime = lib.callback.await('opentheater:serverTime', false)
     if srvTime then
-        serverTimeOffset = srvTime - os.time()
+        serverTimeOffset = srvTime - getEpochFromLocal()
         log(('server time offset = %ds'):format(serverTimeOffset))
     end
 
